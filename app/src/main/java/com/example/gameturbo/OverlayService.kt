@@ -7,14 +7,18 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.drawable.GradientDrawable
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
+import android.view.Choreographer
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -25,6 +29,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -33,21 +38,52 @@ import kotlin.math.abs
 class OverlayService : Service() {
     private lateinit var wm: WindowManager
     private lateinit var cross: CrosshairView
-    private lateinit var hud: TextView
+    private lateinit var bar: LinearLayout
     private lateinit var bubble: TextView
+    private lateinit var tCpu: TextView
+    private lateinit var tGpu: TextView
+    private lateinit var tRam: TextView
+    private lateinit var tBat: TextView
+    private lateinit var tTemp: TextView
+    private lateinit var tHz: TextView
+    private lateinit var tClock: TextView
     private var menu: View? = null
     private val handler = Handler(Looper.getMainLooper())
     private val colors = intArrayOf(Color.RED, Color.GREEN, Color.CYAN, Color.YELLOW, Color.WHITE)
     private var colorIdx = 0
+    private var frames = 0
+    private var lastTick = 0L
+
+    private val frameCb = object : Choreographer.FrameCallback {
+        override fun doFrame(frameTimeNanos: Long) {
+            frames++
+            Choreographer.getInstance().postFrameCallback(this)
+        }
+    }
 
     private val ticker = object : Runnable {
         override fun run() {
-            val bm = getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-            val bat = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
             val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-            val mi = ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
-            val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
-            hud.text = "$time | $bat%\nRAM ${mi.availMem / 1048576} MB"
+            val mi = ActivityManager.MemoryInfo()
+            am.getMemoryInfo(mi)
+            val ramPct = if (mi.totalMem > 0) ((mi.totalMem - mi.availMem) * 100 / mi.totalMem).toInt() else 0
+            val bi = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            val level = bi?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = bi?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+            val bat = if (level >= 0 && scale > 0) level * 100 / scale else 0
+            val temp = (bi?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10
+            val now = SystemClock.elapsedRealtime()
+            val dt = if (lastTick == 0L) 1000L else now - lastTick
+            lastTick = now
+            val hz = (frames * 1000L / dt).toInt()
+            frames = 0
+            setVal(tCpu, "CPU ", readCpu(), "%", 75)
+            setVal(tGpu, "GPU ", readGpu(), "%", 75)
+            setVal(tRam, "RAM ", ramPct, "%", 75)
+            setVal(tBat, "BAT ", bat, "%", 1000)
+            setVal(tTemp, "", temp, "°C", 40)
+            setVal(tHz, "", hz, "Hz", 1000)
+            tClock.text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
             handler.postDelayed(this, 1000)
         }
     }
@@ -62,18 +98,7 @@ class OverlayService : Service() {
         cross = CrosshairView(this)
         wm.addView(cross, params(LP.MATCH_PARENT, LP.MATCH_PARENT, touch = false, full = true))
 
-        hud = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            setBackgroundColor(0x88000000.toInt())
-            textSize = 10f
-            setPadding(10, 2, 10, 2)
-            visibility = View.GONE
-        }
-        val hp = params(LP.WRAP_CONTENT, LP.WRAP_CONTENT, touch = true)
-        hp.x = 430
-        hp.y = 4
-        wm.addView(hud, hp)
-        drag(hud) { }
+        buildBar()
 
         bubble = TextView(this).apply {
             text = "GT"
@@ -87,11 +112,109 @@ class OverlayService : Service() {
         bp.x = 20
         bp.y = 300
         wm.addView(bubble, bp)
-        drag(bubble) {
+        drag(bubble, bubble) {
             val p = bubble.layoutParams as LP
             toggleMenu(p.x, p.y)
         }
+
+        Choreographer.getInstance().postFrameCallback(frameCb)
         handler.post(ticker)
+    }
+
+    private fun metric(): TextView {
+        return TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 11f
+            setPadding(14, 0, 14, 0)
+            text = "--"
+        }
+    }
+
+    private fun buildBar() {
+        val handle = TextView(this).apply {
+            text = "✥"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                setColor(0xFF29B6F6.toInt())
+                cornerRadius = 20f
+            }
+        }
+        tCpu = metric()
+        tGpu = metric()
+        tRam = metric()
+        tBat = metric()
+        tTemp = metric()
+        tHz = metric()
+        tClock = metric()
+        bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                setColor(0xCC202020.toInt())
+                cornerRadius = 40f
+            }
+            setPadding(8, 6, 16, 6)
+        }
+        bar.addView(handle, LinearLayout.LayoutParams(64, 64))
+        for (t in listOf(tCpu, tGpu, tRam, tBat, tTemp, tHz, tClock)) {
+            bar.addView(t)
+        }
+        val dm = resources.displayMetrics
+        val lp = params(LP.WRAP_CONTENT, LP.WRAP_CONTENT, touch = true)
+        lp.x = (dm.widthPixels * 0.27f).toInt()
+        lp.y = (dm.heightPixels * 0.68f).toInt()
+        wm.addView(bar, lp)
+        drag(handle, bar) { }
+    }
+
+    private fun setVal(t: TextView, label: String, v: Int, unit: String, warnAt: Int) {
+        if (v < 0) {
+            t.text = label + "--"
+            t.setTextColor(Color.WHITE)
+        } else {
+            t.text = label + v + unit
+            t.setTextColor(if (v >= warnAt) 0xFFFFA000.toInt() else Color.WHITE)
+        }
+    }
+
+    private fun readCpu(): Int {
+        var cur = 0L
+        var max = 0L
+        val n = Runtime.getRuntime().availableProcessors()
+        for (i in 0 until n) {
+            try {
+                val base = "/sys/devices/system/cpu/cpu" + i + "/cpufreq/"
+                val c = File(base + "scaling_cur_freq").readText().trim().toLong()
+                val m = File(base + "cpuinfo_max_freq").readText().trim().toLong()
+                cur += c
+                max += m
+            } catch (e: Exception) {
+            }
+        }
+        return if (max > 0) (cur * 100 / max).toInt() else -1
+    }
+
+    private fun readGpu(): Int {
+        try {
+            val f = File("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage")
+            if (f.canRead()) {
+                return f.readText().trim().split(" ")[0].toInt()
+            }
+        } catch (e: Exception) {
+        }
+        try {
+            val f = File("/sys/class/kgsl/kgsl-3d0/gpubusy")
+            if (f.canRead()) {
+                val p = f.readText().trim().split(Regex("\\s+"))
+                val busy = p[0].toLong()
+                val total = p[1].toLong()
+                if (total > 0) return (busy * 100 / total).toInt()
+            }
+        } catch (e: Exception) {
+        }
+        return -1
     }
 
     private fun params(w: Int, h: Int, touch: Boolean, full: Boolean = false): LP {
@@ -106,15 +229,15 @@ class OverlayService : Service() {
         return p
     }
 
-    private fun drag(v: View, onTap: () -> Unit) {
-        v.setOnTouchListener(object : View.OnTouchListener {
+    private fun drag(handleView: View, target: View, onTap: () -> Unit) {
+        handleView.setOnTouchListener(object : View.OnTouchListener {
             var sx = 0
             var sy = 0
             var tx = 0f
             var ty = 0f
             var moved = false
             override fun onTouch(view: View, e: MotionEvent): Boolean {
-                val p = view.layoutParams as LP
+                val p = target.layoutParams as LP
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
                         sx = p.x; sy = p.y; tx = e.rawX; ty = e.rawY; moved = false
@@ -125,7 +248,7 @@ class OverlayService : Service() {
                         if (abs(dx) > 10 || abs(dy) > 10) moved = true
                         p.x = sx + dx
                         p.y = sy + dy
-                        wm.updateViewLayout(view, p)
+                        wm.updateViewLayout(target, p)
                     }
                     MotionEvent.ACTION_UP -> if (!moved) onTap()
                 }
@@ -187,8 +310,8 @@ class OverlayService : Service() {
         nudge("▼", 0f, 2f)
         col.addView(row)
         add("Reset posisi") { cross.offX = 0f; cross.offY = 0f; cross.invalidate() }
-        add("Info jam/baterai/RAM") {
-            hud.visibility = if (hud.visibility == View.VISIBLE) View.GONE else View.VISIBLE
+        add("Info bar ON/OFF") {
+            bar.visibility = if (bar.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         }
         add("Bersihkan RAM") { clearRam() }
         add("Tutup Game Turbo") { stopSelf() }
@@ -225,7 +348,8 @@ class OverlayService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(ticker)
-        listOfNotNull(cross, hud, bubble, menu).forEach { runCatching { wm.removeView(it) } }
+        Choreographer.getInstance().removeFrameCallback(frameCb)
+        listOfNotNull(cross, bar, bubble, menu).forEach { runCatching { wm.removeView(it) } }
         super.onDestroy()
     }
 }
