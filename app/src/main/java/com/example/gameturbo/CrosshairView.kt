@@ -11,13 +11,15 @@ class CrosshairView(c: Context) : View(c) {
     var size = 40f
     var thick = 4f
     var color = Color.RED
+    var offX = 0f
+    var offY = 0f
     private val p = Paint(Paint.ANTI_ALIAS_FLAG)
 
     override fun onDraw(cv: Canvas) {
         p.color = color
         p.strokeWidth = thick
-        val cx = width / 2f
-        val cy = height / 2f
+        val cx = width / 2f + offX
+        val cy = height / 2f + offY
         when (style) {
             0 -> {
                 p.style = Paint.Style.STROKE
