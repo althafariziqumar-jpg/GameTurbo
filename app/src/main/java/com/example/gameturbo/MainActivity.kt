@@ -20,7 +20,7 @@ class MainActivity : Activity() {
             setPadding(48, 48, 48, 48)
         }
         root.addView(TextView(this).apply {
-            text = "Game Turbo\nJendela mengambang + Crosshair"
+            text = "Game Turbo\nPanel Turbo + Crosshair + Macro"
             textSize = 20f
             gravity = Gravity.CENTER
         })
@@ -33,8 +33,10 @@ class MainActivity : Activity() {
             setOnClickListener { stopService(Intent(this@MainActivity, OverlayService::class.java)) }
         })
         setContentView(root)
-        if (android.os.Build.VERSION.SDK_INT >= 33)
-            requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), 1)
+        val perms = ArrayList<String>()
+        perms.add("android.permission.RECORD_AUDIO")
+        if (android.os.Build.VERSION.SDK_INT >= 33) perms.add("android.permission.POST_NOTIFICATIONS")
+        requestPermissions(perms.toTypedArray(), 1)
     }
 
     private fun start() {
