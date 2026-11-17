@@ -30,7 +30,10 @@ class MainActivity : Activity() {
         })
         root.addView(Button(this).apply {
             text = "Matikan"
-            setOnClickListener { stopService(Intent(this@MainActivity, OverlayService::class.java)) }
+            setOnClickListener {
+                Triggers.destroy()
+                stopService(Intent(this@MainActivity, OverlayService::class.java))
+            }
         })
         setContentView(root)
         val perms = ArrayList<String>()
@@ -46,6 +49,7 @@ class MainActivity : Activity() {
             return
         }
         startForegroundService(Intent(this, OverlayService::class.java))
+        Triggers.restore(this)
         moveTaskToBack(true)
     }
 }
