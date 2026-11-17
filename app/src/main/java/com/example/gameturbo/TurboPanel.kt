@@ -3,6 +3,8 @@ package com.example.gameturbo
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.view.Gravity
 import android.view.View
@@ -12,6 +14,21 @@ import android.widget.TextView
 import android.widget.Toast
 
 class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
+    companion object {
+        var live: TurboPanel? = null
+
+        fun reopen(svc: OverlayService) {
+            val l = live
+            if (l != null && l.root.isAttachedToWindow) return
+            try {
+                val m = OverlayService::class.java.getDeclaredMethod("openPanel")
+                m.isAccessible = true
+                m.invoke(svc)
+            } catch (e: Throwable) {
+            }
+        }
+    }
+
     val root = LinearLayout(ctx)
     private val scroll = ScrollView(ctx)
     private val body = LinearLayout(ctx)
@@ -23,6 +40,8 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
     private val backBtn: TextView
 
     init {
+        live = this
+        Triggers.restore(ctx)
         root.orientation = LinearLayout.VERTICAL
         root.background = rr(Th.BG, ctx.dp(20).toFloat(), Th.ACC)
         root.setPadding(ctx.dp(12), ctx.dp(10), ctx.dp(12), ctx.dp(10))
@@ -77,7 +96,8 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
         body.addView(v, lp)
     }
 
-    private fun render() {
+    private fun render(keep: Boolean = false) {
+        val y = scroll.scrollY
         body.removeAllViews()
         timerStatus = null
         voiceStatus = null
@@ -106,7 +126,11 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
             "settings" -> pgSettings()
             else -> pgMain()
         }
-        scroll.scrollTo(0, 0)
+        if (keep) {
+            scroll.post { scroll.scrollTo(0, y) }
+        } else {
+            scroll.scrollTo(0, 0)
+        }
     }
 
     private fun pgMain() {
@@ -186,6 +210,31 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
         }
     }
 
+    private fun styleGrid(): LinearLayout {
+        val sel = S.i("ch_style", 0)
+        val box = LinearLayout(ctx)
+        box.orientation = LinearLayout.VERTICAL
+        for (r in 0 until 3) {
+            val row = LinearLayout(ctx)
+            row.orientation = LinearLayout.HORIZONTAL
+            for (k in 0 until 4) {
+                val i = r * 4 + k
+                val pv = CrosshairPreview(ctx, i)
+                pv.background = rr(if (i == sel) Th.ACC else Th.OFF, ctx.dp(10).toFloat())
+                pv.setOnClickListener {
+                    S.put("ch_style", i)
+                    svc.applyCrosshair()
+                    render(true)
+                }
+                val lp = LinearLayout.LayoutParams(0, ctx.dp(56), 1f)
+                lp.setMargins(ctx.dp(3), ctx.dp(3), ctx.dp(3), ctx.dp(3))
+                row.addView(pv, lp)
+            }
+            box.addView(row)
+        }
+        return box
+    }
+
     private fun pgCrosshair() {
         val c = ctx.card()
         c.addView(ctx.item("⌖", "Crosshair aktif", "",
@@ -195,21 +244,51 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
             }, null))
         body.addView(c)
 
+        val c1 = ctx.card()
+        c1.addView(ctx.tv("Bentuk (" + CROSS_STYLES + " pilihan)", 13f, Th.TXT))
+        c1.addView(styleGrid())
+        body.addView(c1)
+
         val c2 = ctx.card()
-        c2.addView(ctx.tv("Bentuk", 13f, Th.TXT))
-        c2.addView(ctx.choice(listOf("Plus", "Titik", "Cincin", "Celah"), "ch_style", 0) { svc.applyCrosshair() })
         c2.addView(ctx.tv("Warna", 13f, Th.TXT))
-        c2.addView(ctx.choice(listOf("Merah", "Hijau", "Cyan", "Kuning", "Putih", "Ungu"), "ch_color", 0) { svc.applyCrosshair() })
-        c2.addView(ctx.slider("Ukuran", 10, 120, "ch_size", 40, " px") { svc.applyCrosshair() })
-        c2.addView(ctx.slider("Ketebalan", 1, 12, "ch_thick", 4, " px") { svc.applyCrosshair() })
-        c2.addView(ctx.slider("Transparansi", 20, 100, "ch_alpha", 100, "%") { svc.applyCrosshair() })
-        c2.addView(ctx.slider("Geser kiri / kanan", -100, 100, "ch_x", 0, " px") { svc.applyCrosshair() })
-        c2.addView(ctx.slider("Geser atas / bawah", -100, 100, "ch_y", 0, " px") { svc.applyCrosshair() })
+        c2.addView(ctx.choice(listOf("Merah", "Hijau", "Cyan", "Kuning", "Putih", "Ungu"), "ch_color", 0) {
+            S.put("ch_custom", false)
+            svc.applyCrosshair()
+            render(true)
+        })
+        c2.addView(ctx.item("🎨", "Warna kustom", "",
+            ctx.toggle(S.b("ch_custom", false)) {
+                S.put("ch_custom", it)
+                svc.applyCrosshair()
+                render(true)
+            }, null))
+        if (S.b("ch_custom", false)) {
+            val bar = View(ctx)
+            val cols = IntArray(7)
+            for (i in 0..6) {
+                cols[i] = Color.HSVToColor(floatArrayOf(i * 60f, 1f, 1f))
+            }
+            val g = GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT, cols)
+            g.cornerRadius = ctx.dp(4).toFloat()
+            bar.background = g
+            c2.addView(bar, LinearLayout.LayoutParams(-1, ctx.dp(8)))
+            c2.addView(ctx.slider("Warna", 0, 360, "ch_hue", 0, "°") { svc.applyCrosshair() })
+        }
         body.addView(c2)
+
+        val c3 = ctx.card()
+        c3.addView(ctx.slider("Ukuran", 10, 120, "ch_size", 40, " px") { svc.applyCrosshair() })
+        c3.addView(ctx.slider("Ketebalan", 1, 12, "ch_thick", 4, " px") { svc.applyCrosshair() })
+        c3.addView(ctx.slider("Transparansi", 20, 100, "ch_alpha", 100, "%") { svc.applyCrosshair() })
+        c3.addView(ctx.slider("Geser kiri / kanan", -100, 100, "ch_x", 0, " px") { svc.applyCrosshair() })
+        c3.addView(ctx.slider("Geser atas / bawah", -100, 100, "ch_y", 0, " px") { svc.applyCrosshair() })
+        body.addView(c3)
 
         add(ctx.btn("Reset crosshair", Th.OFF) {
             S.put("ch_style", 0)
             S.put("ch_color", 0)
+            S.put("ch_custom", false)
+            S.put("ch_hue", 0)
             S.put("ch_size", 40)
             S.put("ch_thick", 4)
             S.put("ch_alpha", 100)
@@ -249,7 +328,7 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
 
     private fun pgExtra() {
         val c = ctx.card()
-        c.addView(ctx.item("🕹", "Macro", "Rekam & putar ketukan layar", ctx.arrow()) { go("macro") })
+        c.addView(ctx.item("🕹", "Macro", "Trigger & rekaman ketukan", ctx.arrow()) { go("macro") })
         c.addView(ctx.divider())
         c.addView(ctx.item("☀", "Layar tetap menyala", "Cegah layar mati saat bermain",
             ctx.toggle(S.b("keep_on", true)) {
@@ -275,7 +354,7 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
     private fun pgMacro() {
         val st = macroState()
         val c = ctx.card()
-        val a = ctx.tv("Langkah tersimpan: " + MacroService.steps.size, 14f, Th.TXT, true)
+        val a = ctx.tv("Trigger: " + Triggers.size() + "  |  Rekaman: " + MacroService.steps.size + " langkah", 13f, Th.TXT, true)
         a.setPadding(0, ctx.dp(6), 0, ctx.dp(2))
         c.addView(a)
         val label = when (st) {
@@ -315,6 +394,17 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
             body.addView(ctx.note("Jalankan Shizuku lewat Debugging nirkabel (butuh Wi-Fi). Perlu diulang setelah HP dihidupkan ulang."))
         }
 
+        val ct = ctx.card()
+        ct.addView(ctx.item("🎯", "Tombol trigger", "Tombol melayang untuk mengetuk target",
+            ctx.toggle(S.b("mt_on", true)) { Triggers.setVisible(it) }, null))
+        body.addView(ct)
+        add(ctx.btn("✎ Buka Editor Trigger") {
+            svc.closePanel()
+            Triggers.openEditor(ctx, { TurboPanel.reopen(svc) }, null)
+        })
+        body.addView(ctx.note("Buka game dulu, lalu buka editor lewat bubble ⚡ agar target bisa dipasang tepat di atas tombol game."))
+
+        body.addView(ctx.tv("Macro rekaman", 14f, Th.ACC2, true))
         val c2 = ctx.card()
         c2.addView(ctx.slider("Ulangi (0 = tanpa henti)", 0, 100, "mc_loops", 1, "x") {})
         c2.addView(ctx.slider("Kecepatan", 50, 300, "mc_speed", 100, "%") {})
@@ -334,12 +424,12 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
         add(ctx.rowOf(
             ctx.btn("■ Stop", Th.OFF) {
                 svc.stopMacro()
-                render()
+                render(true)
             },
             ctx.btn("🗑 Hapus", Th.RED) {
                 MacroService.steps.clear()
                 MacroService.save()
-                render()
+                render(true)
             }
         ))
         body.addView(ctx.note("Tip auto-tap: rekam 1 ketukan, lalu atur Ulangi ke 0. Hentikan macro dengan mengetuk bubble ⚡. Setiap ketukan punya jeda sekitar 0,1 sampai 0,3 detik."))
@@ -428,13 +518,19 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
         })
         body.addView(c)
         add(ctx.btn("Reset semua pengaturan", Th.OFF) {
+            val mt = S.s("mt_data", "")
             S.reset()
+            S.put("mt_data", mt)
             svc.applyCrosshair()
             svc.applyMonitor()
             svc.applyOptions()
+            Triggers.reload()
             root.alpha = 1f
             render()
         })
-        add(ctx.btn("Keluar dari Turbo", Th.RED) { svc.quit() })
+        add(ctx.btn("Keluar dari Turbo", Th.RED) {
+            Triggers.destroy()
+            svc.quit()
+        })
     }
 }
