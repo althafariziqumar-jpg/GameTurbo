@@ -25,13 +25,14 @@ import java.util.concurrent.Executors
 import kotlin.math.abs
 
 object Mc {
-    val BG = 0xF00E2233.toInt()
-    val BTN = 0xFF15405E.toInt()
-    val ACC = 0xFF5CC8FF.toInt()
-    val TXT = 0xFFE6F6FF.toInt()
-    val DIM = 0xFF8FB3C9.toInt()
+    val BG = 0xF0161625.toInt()
+    val BTN = 0xFF23233B.toInt()
+    val ACC = 0xFF8B5CF6.toInt()
+    val ACC2 = 0xFFC4B5FD.toInt()
+    val TXT = 0xFFFFFFFF.toInt()
+    val DIM = 0xFF9CA3AF.toInt()
     val RED = 0xFFEF4444.toInt()
-    val DARK = 0xFF0E2233.toInt()
+    val DARK = 0xFF161625.toInt()
 }
 
 class Trig(var id: Int, var bx: Int, var by: Int, var mode: Int, var hold: Int, var gap: Int, var count: Int) {
@@ -60,7 +61,7 @@ object Sh {
         }
     }
 
-    private fun open(): Process? {
+    private fun openShell(): Process? {
         return try {
             val cls = Class.forName("rikka.shizuku.Shizuku")
             val m = cls.getDeclaredMethod("newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java)
@@ -76,7 +77,7 @@ object Sh {
             try {
                 var p = proc
                 if (p == null) {
-                    p = open()
+                    p = openShell()
                     proc = p
                 }
                 if (p == null) return
@@ -98,9 +99,12 @@ class TargetView(c: Context, private val label: String, private val sel: Boolean
         val cx = width / 2f
         val cy = height / 2f
         val r = width * 0.30f
+        p.style = Paint.Style.FILL
+        p.color = 0x338B5CF6
+        canvas.drawCircle(cx, cy, r, p)
         p.style = Paint.Style.STROKE
         p.strokeWidth = 4f
-        p.color = if (sel) 0xFFFF4D4D.toInt() else 0x99FF4D4D.toInt()
+        p.color = if (sel) 0xFFE879F9.toInt() else 0x99E879F9.toInt()
         canvas.drawCircle(cx, cy, r, p)
         canvas.drawLine(cx - r - 10f, cy, cx + r + 10f, cy, p)
         canvas.drawLine(cx, cy - r - 10f, cx, cy + r + 10f, p)
@@ -126,7 +130,7 @@ object Triggers {
     private val loops = HashMap<Int, Runnable>()
     private var editor: LinearLayout? = null
     private var edBody: LinearLayout? = null
-    private var edTitle: TextView? = null
+    private var edCount: TextView? = null
     private var settingsOpen = false
     private var onBack: (() -> Unit)? = null
     private var onDone: (() -> Unit)? = null
@@ -325,10 +329,14 @@ object Triggers {
     }
 
     private fun paintBtn(v: TextView, selected: Boolean, active: Boolean) {
-        val g = GradientDrawable()
+        val cols = if (active) {
+            intArrayOf(0xFFFFFFFF.toInt(), 0xFFC4B5FD.toInt())
+        } else {
+            intArrayOf(0xFFA78BFA.toInt(), 0xFF6D28D9.toInt())
+        }
+        val g = GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, cols)
         g.shape = GradientDrawable.OVAL
-        g.setColor(if (active) Color.WHITE else 0xFF1E88C7.toInt())
-        if (selected) g.setStroke(6, Mc.ACC) else g.setStroke(3, 0x88FFFFFF.toInt())
+        if (selected) g.setStroke(6, Mc.ACC2) else g.setStroke(3, 0x88FFFFFF.toInt())
         v.background = g
         v.setTextColor(if (active) Mc.DARK else Color.WHITE)
     }
@@ -456,7 +464,7 @@ object Triggers {
             return
         }
         if (t.targets.isEmpty()) {
-            toast("Trigger ini belum punya target. Buka editor lalu Pasang Target.")
+            toast("Trigger ini belum punya target. Buka editor lalu pasang target.")
             return
         }
         if (t.mode == 0) {
@@ -525,7 +533,7 @@ object Triggers {
         val e = editor
         editor = null
         edBody = null
-        edTitle = null
+        edCount = null
         editing = false
         if (e != null) {
             try {
@@ -560,8 +568,8 @@ object Triggers {
     private fun edBtn(text: String, bg: Int, fg: Int, click: () -> Unit): TextView {
         val t = app!!.tv(text, 12f, fg, true)
         t.gravity = Gravity.CENTER
-        t.setPadding(dp(8), dp(12), dp(8), dp(12))
-        t.background = rr(bg, dp(6).toFloat(), 0x445CC8FF)
+        t.setPadding(dp(8), dp(11), dp(8), dp(11))
+        t.background = rr(bg, dp(12).toFloat(), 0x338B5CF6)
         t.setOnClickListener { click() }
         return t
     }
@@ -573,8 +581,8 @@ object Triggers {
         val w = if (land) minOf(dp(340), (dm.widthPixels * 0.5f).toInt()) else (dm.widthPixels * 0.94f).toInt()
         val root = LinearLayout(c)
         root.orientation = LinearLayout.VERTICAL
-        root.background = rr(Mc.BG, dp(4).toFloat(), Mc.ACC)
-        root.setPadding(dp(10), dp(8), dp(10), dp(8))
+        root.background = rr(Mc.BG, dp(20).toFloat(), Mc.ACC)
+        root.setPadding(dp(12), dp(10), dp(12), dp(10))
 
         val head = LinearLayout(c)
         head.orientation = LinearLayout.HORIZONTAL
@@ -602,18 +610,21 @@ object Triggers {
             }
         })
         val back = c.tv("‹", 30f, Mc.TXT, true)
-        back.setPadding(dp(4), 0, dp(12), 0)
+        back.setPadding(dp(2), 0, dp(10), 0)
         back.setOnClickListener { handler.post { finish(1) } }
-        val title = c.tv("MACRO", 17f, Mc.TXT, true)
-        title.letterSpacing = 0.15f
-        edTitle = title
-        val cancel = edBtn("✕", 0xFF1B3A52.toInt(), Mc.TXT) { handler.post { finish(2) } }
+        val title = c.tv("⚡ Macro", 20f, Mc.ACC, true)
+        val count = c.tv("0/" + MAX, 12f, Mc.ACC2, true)
+        count.setPadding(dp(10), dp(4), dp(10), dp(4))
+        count.background = rr(0x338B5CF6, dp(10).toFloat())
+        edCount = count
+        val cancel = edBtn("✕", Mc.BTN, Mc.TXT) { handler.post { finish(2) } }
         val ok = edBtn("✓", Mc.ACC, Mc.DARK) { handler.post { finish(0) } }
         head.addView(grip)
         head.addView(back)
         head.addView(title, LinearLayout.LayoutParams(0, -2, 1f))
-        head.addView(cancel, lm(dp(46), -2, 0f))
-        head.addView(ok, lm(dp(46), -2, 0f))
+        head.addView(count, lm(-2, -2, 0f))
+        head.addView(cancel, lm(dp(44), -2, 0f))
+        head.addView(ok, lm(dp(44), -2, 0f))
 
         val body = LinearLayout(c)
         body.orientation = LinearLayout.VERTICAL
@@ -633,7 +644,7 @@ object Triggers {
         val box = LinearLayout(c)
         box.orientation = LinearLayout.VERTICAL
         box.setPadding(0, dp(4), 0, dp(4))
-        val value = c.tv("" + getter() + unit, 13f, Mc.ACC, true)
+        val value = c.tv("" + getter() + unit, 13f, Mc.ACC2, true)
         val head = LinearLayout(c)
         head.orientation = LinearLayout.HORIZONTAL
         head.addView(c.tv(title, 13f, Mc.DIM), LinearLayout.LayoutParams(0, -2, 1f))
@@ -642,7 +653,7 @@ object Triggers {
         sb.max = max - min
         sb.progress = getter().coerceIn(min, max) - min
         sb.progressTintList = ColorStateList.valueOf(Mc.ACC)
-        sb.thumbTintList = ColorStateList.valueOf(Mc.ACC)
+        sb.thumbTintList = ColorStateList.valueOf(Mc.ACC2)
         sb.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(s: SeekBar?, p: Int, fromUser: Boolean) {
                 if (fromUser) {
@@ -689,16 +700,16 @@ object Triggers {
         val body = edBody ?: return
         val c = app!!
         body.removeAllViews()
-        edTitle?.text = "MACRO " + list.size + "/" + MAX
+        edCount?.text = "" + list.size + "/" + MAX
 
         val r1 = LinearLayout(c)
         r1.orientation = LinearLayout.HORIZONTAL
-        r1.addView(edBtn("＋  TAMBAH\nTRIGGER", Mc.BTN, Mc.TXT) {
+        r1.addView(edBtn("＋ Trigger", Mc.BTN, Mc.TXT) {
             addTrigger()
             rebuild()
             renderEditor()
         }, lm(0, -2, 1f))
-        r1.addView(edBtn("◎  PASANG\nTARGET", Mc.BTN, Mc.TXT) {
+        r1.addView(edBtn("◎ Target", Mc.BTN, Mc.TXT) {
             addTarget()
             rebuild()
             renderEditor()
@@ -706,36 +717,54 @@ object Triggers {
         body.addView(r1)
 
         val has = list.isNotEmpty()
+        val chips = LinearLayout(c)
+        chips.orientation = LinearLayout.HORIZONTAL
+        chips.gravity = Gravity.CENTER_VERTICAL
+        chips.setPadding(dp(3), dp(4), dp(3), dp(4))
+        if (!has) {
+            chips.addView(c.tv("Belum ada trigger", 12f, Mc.DIM))
+        } else {
+            val lb = c.tv("Pilih:", 12f, Mc.DIM)
+            lb.setPadding(0, 0, dp(6), 0)
+            chips.addView(lb)
+            for (i in list.indices) {
+                val on = i == sel
+                chips.addView(edBtn("" + list[i].id, if (on) Mc.ACC else Mc.BTN, if (on) Mc.DARK else Mc.TXT) {
+                    sel = i
+                    rebuild()
+                    renderEditor()
+                }, lm(dp(38), -2, 0f))
+            }
+        }
+        body.addView(chips)
+
         val r2 = LinearLayout(c)
         r2.orientation = LinearLayout.HORIZONTAL
-        r2.gravity = Gravity.CENTER_VERTICAL
-        val tl = if (has) "TRIGGER " + list[sel].id + "   ›" else "TRIGGER  –"
-        r2.addView(edBtn(tl, Mc.BTN, if (has) Mc.TXT else Mc.DIM) {
-            if (list.isNotEmpty()) {
-                sel = (sel + 1) % list.size
-                rebuild()
-                renderEditor()
-            }
-        }, lm(0, -2, 1f))
-        r2.addView(edBtn("🗑", Mc.BTN, Mc.RED) { deleteSel() }, lm(dp(48), -2, 0f))
-        r2.addView(edBtn("⚙", if (settingsOpen) Mc.ACC else Mc.BTN, if (settingsOpen) Mc.DARK else Mc.TXT) {
+        r2.addView(edBtn("🗑 Hapus", Mc.BTN, Mc.RED) { deleteSel() }, lm(0, -2, 1f))
+        r2.addView(edBtn("⚙ Atur", if (settingsOpen) Mc.ACC else Mc.BTN, if (settingsOpen) Mc.DARK else Mc.TXT) {
             settingsOpen = !settingsOpen
             renderEditor()
-        }, lm(dp(48), -2, 0f))
+        }, lm(0, -2, 1f))
         body.addView(r2)
+
+        if (has && list[sel].targets.isEmpty()) {
+            val hint = c.tv("Tekan ◎ Target, lalu geser lingkaran ke tombol di game.", 11f, Mc.DIM)
+            hint.setPadding(dp(4), dp(2), dp(4), dp(2))
+            body.addView(hint)
+        }
 
         if (settingsOpen && has) {
             val t = list[sel]
             val card = LinearLayout(c)
             card.orientation = LinearLayout.VERTICAL
-            card.setPadding(dp(8), dp(6), dp(8), dp(6))
-            card.background = rr(0x33000000, dp(4).toFloat(), 0x335CC8FF)
+            card.setPadding(dp(10), dp(8), dp(10), dp(8))
+            card.background = rr(Mc.BTN, dp(14).toFloat(), 0x228B5CF6)
             card.addView(c.tv("Mode tekan", 12f, Mc.DIM))
             val modes = LinearLayout(c)
             modes.orientation = LinearLayout.HORIZONTAL
             val names = listOf("Sekali", "Tahan", "Toggle")
             for (i in names.indices) {
-                modes.addView(edBtn(names[i], if (t.mode == i) Mc.ACC else Mc.BTN, if (t.mode == i) Mc.DARK else Mc.TXT) {
+                modes.addView(edBtn(names[i], if (t.mode == i) Mc.ACC else Mc.BG, if (t.mode == i) Mc.DARK else Mc.TXT) {
                     t.mode = i
                     renderEditor()
                 }, lm(0, -2, 1f))
@@ -745,7 +774,7 @@ object Triggers {
             card.addView(valSlider("Jeda ulang", 30, 1000, " ms", { t.gap }, { t.gap = it }, 10))
             card.addView(valSlider("Jumlah ketukan (mode Sekali)", 1, 20, "x", { t.count }, { t.count = it }, 1))
             card.addView(c.tv("Target: " + t.targets.size + "/3", 12f, Mc.DIM))
-            card.addView(edBtn("Hapus target terakhir", Mc.BTN, Mc.TXT) {
+            card.addView(edBtn("Hapus target terakhir", Mc.BG, Mc.TXT) {
                 if (t.targets.isNotEmpty()) {
                     t.targets.removeAt(t.targets.size - 1)
                     rebuild()
@@ -759,7 +788,7 @@ object Triggers {
             S.put("mt_size", it)
             applyLook()
         }, 2))
-        body.addView(valSlider("Visibilitas tombol", 20, 100, "%", { S.i("mt_alpha", 67) }, {
+        body.addView(valSlider("Transparansi tombol", 20, 100, "%", { S.i("mt_alpha", 67) }, {
             S.put("mt_alpha", it)
             applyLook()
         }, 0))
