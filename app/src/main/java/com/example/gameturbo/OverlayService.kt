@@ -18,24 +18,28 @@ import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
 import android.os.SystemClock
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.provider.Settings
 import android.view.Choreographer
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.view.WindowManager.LayoutParams as LP
-import android.widget.Button
 import android.widget.LinearLayout
-import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.Socket
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import kotlin.math.abs
 
 class OverlayService : Service() {
+    val voice = VoiceChanger()
     private lateinit var wm: WindowManager
     private lateinit var cross: CrosshairView
     private lateinit var bar: LinearLayout
@@ -45,14 +49,23 @@ class OverlayService : Service() {
     private lateinit var tRam: TextView
     private lateinit var tBat: TextView
     private lateinit var tTemp: TextView
+    private lateinit var tPing: TextView
     private lateinit var tHz: TextView
     private lateinit var tClock: TextView
-    private var menu: View? = null
+    private lateinit var tTimer: TextView
+    private var panel: TurboPanel? = null
+    private var recView: View? = null
     private val handler = Handler(Looper.getMainLooper())
-    private val colors = intArrayOf(Color.RED, Color.GREEN, Color.CYAN, Color.YELLOW, Color.WHITE)
-    private var colorIdx = 0
+    private val colors = intArrayOf(Color.RED, Color.GREEN, Color.CYAN, Color.YELLOW, Color.WHITE, 0xFFA855F7.toInt())
     private var frames = 0
     private var lastTick = 0L
+    private var autoCount = 0
+    private var timerEnd = 0L
+    private var lastMacro = false
+    @Volatile
+    private var alive = true
+    @Volatile
+    private var pingMs = -1
 
     private val frameCb = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
@@ -82,8 +95,39 @@ class OverlayService : Service() {
             setVal(tRam, "RAM ", ramPct, "%", 75)
             setVal(tBat, "BAT ", bat, "%", 1000)
             setVal(tTemp, "", temp, "°C", 40)
+            setVal(tPing, "", pingMs, " ms", 150)
             setVal(tHz, "", hz, "Hz", 1000)
             tClock.text = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())
+
+            if (timerEnd != 0L) {
+                val left = timerLeft()
+                if (left <= 0) {
+                    timerEnd = 0L
+                    tTimer.visibility = View.GONE
+                    Toast.makeText(this@OverlayService, "Timer selesai", Toast.LENGTH_LONG).show()
+                    if (S.b("tm_vib", true)) vibrate()
+                } else {
+                    tTimer.visibility = View.VISIBLE
+                    tTimer.text = "⏳ " + fmt(left)
+                }
+            }
+
+            val auto = S.i("mem_auto", 0)
+            if (auto > 0) {
+                autoCount++
+                if (autoCount >= auto * 60) {
+                    cleanRam()
+                    autoCount = 0
+                }
+            } else {
+                autoCount = 0
+            }
+
+            if (lastMacro != MacroService.running) {
+                lastMacro = MacroService.running
+                applyOptions()
+            }
+            panel?.tick()
             handler.postDelayed(this, 1000)
         }
     }
@@ -92,73 +136,69 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        S.init(this)
+        MacroService.load()
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         startForeground(1, buildNotification())
 
         cross = CrosshairView(this)
         wm.addView(cross, params(LP.MATCH_PARENT, LP.MATCH_PARENT, touch = false, full = true))
-
         buildBar()
-
-        bubble = TextView(this).apply {
-            text = "GT"
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            setBackgroundColor(0xAA1565C0.toInt())
-            width = 120
-            height = 120
-        }
-        val bp = params(LP.WRAP_CONTENT, LP.WRAP_CONTENT, touch = true)
-        bp.x = 20
-        bp.y = 300
-        wm.addView(bubble, bp)
-        drag(bubble, bubble) {
-            val p = bubble.layoutParams as LP
-            toggleMenu(p.x, p.y)
-        }
+        buildBubble()
+        applyCrosshair()
+        applyMonitor()
+        applyOptions()
 
         Choreographer.getInstance().postFrameCallback(frameCb)
+        startPing()
         handler.post(ticker)
     }
 
-    private fun metric(): TextView {
-        return TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 11f
-            setPadding(14, 0, 14, 0)
-            text = "--"
+    private fun params(w: Int, h: Int, touch: Boolean, full: Boolean = false): LP {
+        var flags = LP.FLAG_NOT_FOCUSABLE or LP.FLAG_LAYOUT_IN_SCREEN
+        if (!touch) flags = flags or LP.FLAG_NOT_TOUCHABLE
+        if (full) flags = flags or LP.FLAG_LAYOUT_NO_LIMITS
+        val p = LP(w, h, LP.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT)
+        p.gravity = Gravity.TOP or Gravity.START
+        if (Build.VERSION.SDK_INT >= 28) {
+            p.layoutInDisplayCutoutMode = LP.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
+        return p
+    }
+
+    private fun metric(): TextView {
+        val t = TextView(this)
+        t.setTextColor(Color.WHITE)
+        t.textSize = 11f
+        t.setPadding(dp(5), 0, dp(5), 0)
+        t.text = "--"
+        return t
     }
 
     private fun buildBar() {
-        val handle = TextView(this).apply {
-            text = "✥"
-            setTextColor(Color.WHITE)
-            textSize = 16f
-            gravity = Gravity.CENTER
-            background = GradientDrawable().apply {
-                setColor(0xFF29B6F6.toInt())
-                cornerRadius = 20f
-            }
-        }
+        val handle = TextView(this)
+        handle.text = "✥"
+        handle.setTextColor(Color.WHITE)
+        handle.textSize = 16f
+        handle.gravity = Gravity.CENTER
+        handle.background = rr(0xFF29B6F6.toInt(), dp(8).toFloat())
         tCpu = metric()
         tGpu = metric()
         tRam = metric()
         tBat = metric()
         tTemp = metric()
+        tPing = metric()
         tHz = metric()
         tClock = metric()
-        bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-            background = GradientDrawable().apply {
-                setColor(0xCC202020.toInt())
-                cornerRadius = 40f
-            }
-            setPadding(8, 6, 16, 6)
-        }
-        bar.addView(handle, LinearLayout.LayoutParams(64, 64))
-        for (t in listOf(tCpu, tGpu, tRam, tBat, tTemp, tHz, tClock)) {
+        tTimer = metric()
+        tTimer.visibility = View.GONE
+        bar = LinearLayout(this)
+        bar.orientation = LinearLayout.HORIZONTAL
+        bar.gravity = Gravity.CENTER_VERTICAL
+        bar.background = rr(0xCC202020.toInt(), dp(16).toFloat())
+        bar.setPadding(dp(3), dp(3), dp(8), dp(3))
+        bar.addView(handle, LinearLayout.LayoutParams(dp(28), dp(28)))
+        for (t in listOf(tCpu, tGpu, tRam, tBat, tTemp, tPing, tHz, tClock, tTimer)) {
             bar.addView(t)
         }
         val dm = resources.displayMetrics
@@ -167,6 +207,206 @@ class OverlayService : Service() {
         lp.y = (dm.heightPixels * 0.68f).toInt()
         wm.addView(bar, lp)
         drag(handle, bar) { }
+    }
+
+    private fun buildBubble() {
+        bubble = TextView(this)
+        bubble.text = "⚡"
+        bubble.textSize = 20f
+        bubble.setTextColor(Color.WHITE)
+        bubble.gravity = Gravity.CENTER
+        val bp = params(LP.WRAP_CONTENT, LP.WRAP_CONTENT, touch = true)
+        bp.x = 20
+        bp.y = 300
+        wm.addView(bubble, bp)
+        drag(bubble, bubble) { onBubbleTap() }
+    }
+
+    private fun onBubbleTap() {
+        if (MacroService.running) {
+            stopMacro()
+            return
+        }
+        if (panel != null) closePanel() else openPanel()
+    }
+
+    private fun openPanel() {
+        val p = TurboPanel(this, this)
+        val dm = resources.displayMetrics
+        val w = minOf(dp(360), (dm.widthPixels * 0.92f).toInt())
+        val h = minOf(dp(560), (dm.heightPixels * 0.9f).toInt())
+        val lp = params(w, h, touch = true)
+        lp.gravity = Gravity.CENTER
+        wm.addView(p.root, lp)
+        panel = p
+    }
+
+    fun closePanel() {
+        val p = panel ?: return
+        panel = null
+        voice.stop()
+        try {
+            wm.removeView(p.root)
+        } catch (e: Exception) {
+        }
+    }
+
+    fun quit() {
+        stopSelf()
+    }
+
+    fun applyCrosshair() {
+        cross.style = S.i("ch_style", 0)
+        cross.color = colors[S.i("ch_color", 0)]
+        cross.size = S.i("ch_size", 40).toFloat()
+        cross.thick = S.i("ch_thick", 4).toFloat()
+        cross.offX = S.i("ch_x", 0).toFloat()
+        cross.offY = S.i("ch_y", 0).toFloat()
+        cross.alpha = S.i("ch_alpha", 100) / 100f
+        cross.visibility = if (S.b("ch_on", true)) View.VISIBLE else View.GONE
+        cross.invalidate()
+    }
+
+    fun applyMonitor() {
+        bar.visibility = if (S.b("mon_on", true)) View.VISIBLE else View.GONE
+        bar.alpha = S.i("mon_alpha", 90) / 100f
+        val sz = S.i("mon_size", 11).toFloat()
+        val items = listOf(tCpu, tGpu, tRam, tBat, tTemp, tPing, tHz, tClock)
+        val keys = listOf("mon_cpu", "mon_gpu", "mon_ram", "mon_bat", "mon_temp", "mon_ping", "mon_hz", "mon_clock")
+        for (i in items.indices) {
+            items[i].visibility = if (S.b(keys[i], true)) View.VISIBLE else View.GONE
+            items[i].textSize = sz
+        }
+        tTimer.textSize = sz
+    }
+
+    fun applyOptions() {
+        val s = dp(S.i("bub_size", 44))
+        bubble.width = s
+        bubble.height = s
+        val g = GradientDrawable()
+        g.shape = GradientDrawable.OVAL
+        g.setColor(if (MacroService.running) Th.RED else Th.ACC)
+        bubble.background = g
+        bubble.text = if (MacroService.running) "■" else "⚡"
+        bubble.alpha = S.i("bub_alpha", 85) / 100f
+        val lp = cross.layoutParams as LP
+        if (S.b("keep_on", true)) {
+            lp.flags = lp.flags or LP.FLAG_KEEP_SCREEN_ON
+        } else {
+            lp.flags = lp.flags and LP.FLAG_KEEP_SCREEN_ON.inv()
+        }
+        wm.updateViewLayout(cross, lp)
+    }
+
+    fun setDnd(on: Boolean) {
+        val nm = getSystemService(NotificationManager::class.java)
+        if (!nm.isNotificationPolicyAccessGranted) {
+            S.put("dnd", false)
+            Toast.makeText(this, "Izinkan akses 'Jangan Ganggu' untuk Game Turbo", Toast.LENGTH_LONG).show()
+            val i = Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS)
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            startActivity(i)
+            closePanel()
+            return
+        }
+        nm.setInterruptionFilter(
+            if (on) NotificationManager.INTERRUPTION_FILTER_NONE else NotificationManager.INTERRUPTION_FILTER_ALL
+        )
+    }
+
+    fun cleanRam(): Int {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        var n = 0
+        for (a in packageManager.getInstalledApplications(0)) {
+            if (a.packageName != packageName && (a.flags and ApplicationInfo.FLAG_SYSTEM) == 0) {
+                am.killBackgroundProcesses(a.packageName)
+                n++
+            }
+        }
+        return n
+    }
+
+    fun ramInfo(): String {
+        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+        val mi = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(mi)
+        val total = mi.totalMem / 1048576
+        val free = mi.availMem / 1048576
+        val pct = if (mi.totalMem > 0) ((mi.totalMem - mi.availMem) * 100 / mi.totalMem).toInt() else 0
+        return "RAM terpakai " + pct + "% (bebas " + free + " MB dari " + total + " MB)"
+    }
+
+    fun startTimer(min: Int) {
+        timerEnd = SystemClock.elapsedRealtime() + min * 60000L
+    }
+
+    fun stopTimer() {
+        timerEnd = 0L
+        tTimer.visibility = View.GONE
+    }
+
+    fun timerLeft(): Int {
+        if (timerEnd == 0L) return 0
+        val l = ((timerEnd - SystemClock.elapsedRealtime()) / 1000).toInt()
+        return if (l < 0) 0 else l
+    }
+
+    private fun fmt(sec: Int): String {
+        val m = sec / 60
+        val s = sec % 60
+        return "" + (if (m < 10) "0" else "") + m + ":" + (if (s < 10) "0" else "") + s
+    }
+
+    private fun vibrate() {
+        try {
+            val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+            v.vibrate(VibrationEffect.createOneShot(800, VibrationEffect.DEFAULT_AMPLITUDE))
+        } catch (e: Exception) {
+        }
+    }
+
+    fun startRecord() {
+        closePanel()
+        MacroService.steps.clear()
+        val v = RecordView(this) { stopRecord() }
+        wm.addView(v, params(LP.MATCH_PARENT, LP.MATCH_PARENT, touch = true, full = true))
+        recView = v
+    }
+
+    private fun stopRecord() {
+        val v = recView
+        recView = null
+        if (v != null) {
+            try {
+                wm.removeView(v)
+            } catch (e: Exception) {
+            }
+        }
+        MacroService.save()
+        Toast.makeText(this, "Macro tersimpan: " + MacroService.steps.size + " langkah", Toast.LENGTH_SHORT).show()
+    }
+
+    fun playMacro() {
+        val m = MacroService.inst
+        if (m == null) {
+            Toast.makeText(this, "Aktifkan layanan aksesibilitas dulu (menu Macro)", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (MacroService.steps.isEmpty()) {
+            Toast.makeText(this, "Belum ada macro. Tekan Rekam dulu.", Toast.LENGTH_LONG).show()
+            return
+        }
+        closePanel()
+        m.play(S.i("mc_loops", 1), S.i("mc_speed", 100), S.i("mc_start", 2) * 1000L)
+        applyOptions()
+        Toast.makeText(this, "Macro mulai. Ketuk bubble untuk berhenti.", Toast.LENGTH_SHORT).show()
+    }
+
+    fun stopMacro() {
+        MacroService.inst?.stop()
+        MacroService.running = false
+        applyOptions()
     }
 
     private fun setVal(t: TextView, label: String, v: Int, unit: String, warnAt: Int) {
@@ -217,16 +457,27 @@ class OverlayService : Service() {
         return -1
     }
 
-    private fun params(w: Int, h: Int, touch: Boolean, full: Boolean = false): LP {
-        var flags = LP.FLAG_NOT_FOCUSABLE or LP.FLAG_LAYOUT_IN_SCREEN or LP.FLAG_KEEP_SCREEN_ON
-        if (!touch) flags = flags or LP.FLAG_NOT_TOUCHABLE
-        if (full) flags = flags or LP.FLAG_LAYOUT_NO_LIMITS
-        val p = LP(w, h, LP.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT)
-        p.gravity = Gravity.TOP or Gravity.START
-        if (Build.VERSION.SDK_INT >= 28) {
-            p.layoutInDisplayCutoutMode = LP.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-        }
-        return p
+    private fun startPing() {
+        Thread {
+            while (alive) {
+                if (S.b("mon_on", true) && S.b("mon_ping", true)) {
+                    var ms = -1
+                    try {
+                        val t0 = SystemClock.elapsedRealtime()
+                        val s = Socket()
+                        s.connect(InetSocketAddress("1.1.1.1", 443), 1500)
+                        ms = (SystemClock.elapsedRealtime() - t0).toInt()
+                        s.close()
+                    } catch (e: Exception) {
+                    }
+                    pingMs = ms
+                }
+                try {
+                    Thread.sleep(3000)
+                } catch (e: Exception) {
+                }
+            }
+        }.start()
     }
 
     private fun drag(handleView: View, target: View, onTap: () -> Unit) {
@@ -240,7 +491,11 @@ class OverlayService : Service() {
                 val p = target.layoutParams as LP
                 when (e.action) {
                     MotionEvent.ACTION_DOWN -> {
-                        sx = p.x; sy = p.y; tx = e.rawX; ty = e.rawY; moved = false
+                        sx = p.x
+                        sy = p.y
+                        tx = e.rawX
+                        ty = e.rawY
+                        moved = false
                     }
                     MotionEvent.ACTION_MOVE -> {
                         val dx = (e.rawX - tx).toInt()
@@ -257,86 +512,6 @@ class OverlayService : Service() {
         })
     }
 
-    private fun toggleMenu(x: Int, y: Int) {
-        menu?.let {
-            wm.removeView(it)
-            menu = null
-            return
-        }
-        val col = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(12, 12, 12, 12)
-        }
-        fun btn(t: String, a: () -> Unit): Button {
-            return Button(this).apply {
-                text = t
-                isAllCaps = false
-                textSize = 12f
-                minHeight = 0
-                minimumHeight = 0
-                setPadding(8, 4, 8, 4)
-                setOnClickListener { a() }
-            }
-        }
-        fun add(t: String, a: () -> Unit) {
-            col.addView(btn(t, a))
-        }
-        add("Crosshair ON/OFF") {
-            cross.visibility = if (cross.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }
-        add("Ganti bentuk") { cross.style = (cross.style + 1) % 4; cross.invalidate() }
-        add("Ganti warna") {
-            colorIdx = (colorIdx + 1) % colors.size
-            cross.color = colors[colorIdx]
-            cross.invalidate()
-        }
-        add("Ukuran +") { cross.size += 8; cross.invalidate() }
-        add("Ukuran -") { if (cross.size > 12) cross.size -= 8; cross.invalidate() }
-        add("Tebal +/-") {
-            cross.thick = if (cross.thick >= 10) 2f else cross.thick + 2
-            cross.invalidate()
-        }
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        fun nudge(t: String, dx: Float, dy: Float) {
-            row.addView(btn(t) {
-                cross.offX += dx
-                cross.offY += dy
-                cross.invalidate()
-            })
-        }
-        nudge("◀", -2f, 0f)
-        nudge("▶", 2f, 0f)
-        nudge("▲", 0f, -2f)
-        nudge("▼", 0f, 2f)
-        col.addView(row)
-        add("Reset posisi") { cross.offX = 0f; cross.offY = 0f; cross.invalidate() }
-        add("Info bar ON/OFF") {
-            bar.visibility = if (bar.visibility == View.VISIBLE) View.GONE else View.VISIBLE
-        }
-        add("Bersihkan RAM") { clearRam() }
-        add("Tutup Game Turbo") { stopSelf() }
-
-        val sv = ScrollView(this).apply {
-            setBackgroundColor(0xEE212121.toInt())
-            addView(col)
-        }
-        val h = (resources.displayMetrics.heightPixels * 0.8).toInt()
-        val lp = params(LP.WRAP_CONTENT, h, touch = true)
-        lp.x = x + 130
-        lp.y = 20
-        wm.addView(sv, lp)
-        menu = sv
-    }
-
-    private fun clearRam() {
-        val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-        var n = 0
-        packageManager.getInstalledApplications(0)
-            .filter { it.packageName != packageName && (it.flags and ApplicationInfo.FLAG_SYSTEM) == 0 }
-            .forEach { am.killBackgroundProcesses(it.packageName); n++ }
-        Toast.makeText(this, "Proses latar belakang dibersihkan ($n app)", Toast.LENGTH_SHORT).show()
-    }
-
     private fun buildNotification(): Notification {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(NotificationChannel("gt", "Game Turbo", NotificationManager.IMPORTANCE_LOW))
@@ -347,9 +522,21 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        alive = false
         handler.removeCallbacks(ticker)
         Choreographer.getInstance().removeFrameCallback(frameCb)
-        listOfNotNull(cross, bar, bubble, menu).forEach { runCatching { wm.removeView(it) } }
+        voice.stopRecord()
+        voice.stop()
+        MacroService.inst?.stop()
+        closePanel()
+        for (v in listOf<View?>(cross, bar, bubble, recView)) {
+            if (v != null) {
+                try {
+                    wm.removeView(v)
+                } catch (e: Exception) {
+                }
+            }
+        }
         super.onDestroy()
     }
 }
