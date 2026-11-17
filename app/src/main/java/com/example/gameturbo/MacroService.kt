@@ -1,31 +1,64 @@
 package com.example.gameturbo
 
-import android.accessibilityservice.AccessibilityService
-import android.accessibilityservice.GestureDescription
 import android.content.Context
-import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
-import android.os.Handler
-import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.accessibility.AccessibilityEvent
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import rikka.shizuku.Shizuku
 
 class Step(val x1: Float, val y1: Float, val x2: Float, val y2: Float, val dur: Long, val delay: Long)
 
-class MacroService : AccessibilityService() {
+class MacroService {
     companion object {
-        var inst: MacroService? = null
         val steps = ArrayList<Step>()
+
         @Volatile
         var running = false
+
+        private val engine = MacroService()
+
+        val inst: MacroService?
+            get() = if (granted()) engine else null
+
+        fun installed(c: Context): Boolean {
+            return try {
+                c.packageManager.getPackageInfo("moe.shizuku.privileged.api", 0)
+                true
+            } catch (e: Exception) {
+                false
+            }
+        }
+
+        fun binderAlive(): Boolean {
+            return try {
+                Shizuku.pingBinder()
+            } catch (e: Throwable) {
+                false
+            }
+        }
+
+        fun granted(): Boolean {
+            return try {
+                Shizuku.pingBinder() && !Shizuku.isPreV11() &&
+                    Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+            } catch (e: Throwable) {
+                false
+            }
+        }
+
+        fun askPermission() {
+            try {
+                Shizuku.requestPermission(7001)
+            } catch (e: Throwable) {
+            }
+        }
 
         fun save() {
             val sb = StringBuilder()
@@ -52,74 +85,84 @@ class MacroService : AccessibilityService() {
         }
     }
 
-    private val h = Handler(Looper.getMainLooper())
-
-    override fun onServiceConnected() {
-        super.onServiceConnected()
-        S.init(this)
-        load()
-        inst = this
-    }
-
-    override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-
-    override fun onInterrupt() {}
-
-    override fun onUnbind(intent: Intent?): Boolean {
-        stop()
-        inst = null
-        return super.onUnbind(intent)
-    }
+    private var sh: Process? = null
+    private var worker: Thread? = null
 
     fun play(loops: Int, speed: Int, startDelayMs: Long) {
         if (steps.isEmpty() || running) return
         running = true
-        h.postDelayed({ runStep(0, 0, loops, speed) }, startDelayMs)
+        val list = ArrayList(steps)
+        val t = Thread {
+            try {
+                Thread.sleep(startDelayMs)
+                var round = 0
+                while (running && list.isNotEmpty()) {
+                    for (s in list) {
+                        if (!running) break
+                        Thread.sleep(maxOf(10L, s.delay * 100 / speed))
+                        if (!running) break
+                        val d = maxOf(20L, s.dur * 100 / speed)
+                        send("input swipe " + s.x1.toInt() + " " + s.y1.toInt() + " " + s.x2.toInt() + " " + s.y2.toInt() + " " + d + " >/dev/null 2>&1 &")
+                    }
+                    round++
+                    if (loops != 0 && round >= loops) break
+                }
+                Thread.sleep(1000)
+            } catch (e: InterruptedException) {
+            }
+            running = false
+            closeShell()
+        }
+        worker = t
+        t.start()
     }
 
     fun stop() {
         running = false
-        h.removeCallbacksAndMessages(null)
+        worker?.interrupt()
+        worker = null
+        closeShell()
     }
 
-    private fun runStep(i: Int, round: Int, loops: Int, speed: Int) {
-        if (!running) return
-        if (steps.isEmpty()) {
-            running = false
-            return
+    private fun openShell(): Process? {
+        return try {
+            val cls = Class.forName("rikka.shizuku.Shizuku")
+            val m = cls.getDeclaredMethod("newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java)
+            m.isAccessible = true
+            m.invoke(null, arrayOf("sh"), null, null) as Process
+        } catch (e: Throwable) {
+            null
         }
-        if (i >= steps.size) {
-            val next = round + 1
-            if (loops != 0 && next >= loops) {
-                running = false
-                return
-            }
-            runStep(0, next, loops, speed)
-            return
-        }
-        val s = steps[i]
-        val wait = maxOf(10L, s.delay * 100 / speed)
-        h.postDelayed({
-            if (running) {
-                val p = Path()
-                p.moveTo(s.x1, s.y1)
-                if (s.x2 != s.x1 || s.y2 != s.y1) p.lineTo(s.x2, s.y2)
-                val d = maxOf(20L, s.dur * 100 / speed)
-                val g = GestureDescription.Builder()
-                    .addStroke(GestureDescription.StrokeDescription(p, 0L, d))
-                    .build()
-                val cb = object : AccessibilityService.GestureResultCallback() {
-                    override fun onCompleted(gestureDescription: GestureDescription?) {
-                        runStep(i + 1, round, loops, speed)
-                    }
+    }
 
-                    override fun onCancelled(gestureDescription: GestureDescription?) {
-                        runStep(i + 1, round, loops, speed)
-                    }
+    private fun send(cmd: String) {
+        for (attempt in 0..1) {
+            try {
+                var p = sh
+                if (p == null) {
+                    p = openShell()
+                    sh = p
                 }
-                if (!dispatchGesture(g, cb, null)) running = false
+                if (p == null) return
+                val o = p.outputStream
+                o.write((cmd + "\n").toByteArray())
+                o.flush()
+                return
+            } catch (e: Throwable) {
+                sh = null
             }
-        }, wait)
+        }
+    }
+
+    private fun closeShell() {
+        val p = sh
+        sh = null
+        if (p != null) {
+            try {
+                p.destroy()
+            } catch (e: Throwable) {
+            }
+        }
     }
 }
 
