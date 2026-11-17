@@ -3,7 +3,7 @@ package com.example.gameturbo
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.provider.Settings
+import android.net.Uri
 import android.view.Gravity
 import android.view.View
 import android.widget.LinearLayout
@@ -266,24 +266,53 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
         body.addView(c)
     }
 
+    private fun macroState(): Int {
+        if (MacroService.granted()) return 3
+        if (MacroService.binderAlive()) return 2
+        return if (MacroService.installed(ctx)) 1 else 0
+    }
+
     private fun pgMacro() {
-        val ok = MacroService.inst != null
+        val st = macroState()
         val c = ctx.card()
         val a = ctx.tv("Langkah tersimpan: " + MacroService.steps.size, 14f, Th.TXT, true)
         a.setPadding(0, ctx.dp(6), 0, ctx.dp(2))
         c.addView(a)
-        val b = ctx.tv(if (ok) "Layanan aksesibilitas: aktif ✓" else "Layanan aksesibilitas: belum aktif", 12f, if (ok) Th.OK else Th.RED)
+        val label = when (st) {
+            0 -> "Shizuku: belum terpasang"
+            1 -> "Shizuku: terpasang, belum dijalankan"
+            2 -> "Shizuku: berjalan, belum diizinkan"
+            else -> "Shizuku: siap ✓"
+        }
+        val b = ctx.tv(label, 12f, if (st == 3) Th.OK else Th.RED)
         b.setPadding(0, 0, 0, ctx.dp(6))
         c.addView(b)
         body.addView(c)
-        if (!ok) {
-            add(ctx.btn("Aktifkan layanan aksesibilitas") {
-                val i = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+
+        if (st == 0) {
+            add(ctx.btn("Pasang Shizuku") {
+                val i = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=moe.shizuku.privileged.api"))
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 ctx.startActivity(i)
                 svc.closePanel()
             })
-            body.addView(ctx.note("Android 13+: jika layanan berwarna abu-abu, buka Info Aplikasi Game Turbo, ketuk ⋮ lalu 'Izinkan pengaturan terbatas', kemudian ulangi."))
+        } else if (st == 1) {
+            add(ctx.btn("Buka Shizuku") {
+                val i = ctx.packageManager.getLaunchIntentForPackage("moe.shizuku.privileged.api")
+                if (i != null) {
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    ctx.startActivity(i)
+                    svc.closePanel()
+                }
+            })
+        } else if (st == 2) {
+            add(ctx.btn("Izinkan akses Shizuku") {
+                MacroService.askPermission()
+                svc.closePanel()
+            })
+        }
+        if (st != 3) {
+            body.addView(ctx.note("Jalankan Shizuku lewat Debugging nirkabel (butuh Wi-Fi). Perlu diulang setelah HP dihidupkan ulang."))
         }
 
         val c2 = ctx.card()
@@ -294,7 +323,13 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
 
         add(ctx.rowOf(
             ctx.btn("⏺ Rekam") { svc.startRecord() },
-            ctx.btn("▶ Putar") { svc.playMacro() }
+            ctx.btn("▶ Putar") {
+                if (macroState() == 3) {
+                    svc.playMacro()
+                } else {
+                    Toast.makeText(ctx, "Siapkan Shizuku dulu (lihat status di halaman Macro)", Toast.LENGTH_LONG).show()
+                }
+            }
         ))
         add(ctx.rowOf(
             ctx.btn("■ Stop", Th.OFF) {
@@ -307,7 +342,7 @@ class TurboPanel(private val ctx: Context, private val svc: OverlayService) {
                 render()
             }
         ))
-        body.addView(ctx.note("Tip auto-tap: rekam 1 ketukan, lalu atur Ulangi ke 0. Hentikan macro dengan mengetuk bubble ⚡."))
+        body.addView(ctx.note("Tip auto-tap: rekam 1 ketukan, lalu atur Ulangi ke 0. Hentikan macro dengan mengetuk bubble ⚡. Setiap ketukan punya jeda sekitar 0,1 sampai 0,3 detik."))
     }
 
     private fun pgSpeed() {
