@@ -21,7 +21,9 @@ import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import kotlin.math.abs
 
 object Mc {
@@ -41,47 +43,114 @@ class Trig(var id: Int, var bx: Int, var by: Int, var mode: Int, var hold: Int, 
 
 object Sh {
     private var proc: Process? = null
+    private var fast = false
+    private var triedFast = false
     private val ex = Executors.newSingleThreadExecutor()
 
     fun tap(x: Int, y: Int, hold: Int) {
-        val cmd = "input swipe " + x + " " + y + " " + x + " " + y + " " + hold + " >/dev/null 2>&1 &"
-        ex.execute { send(cmd) }
+        ex.execute { run(x, y, hold) }
     }
 
     fun close() {
-        ex.execute {
-            val p = proc
-            proc = null
-            if (p != null) {
-                try {
-                    p.destroy()
-                } catch (e: Throwable) {
-                }
+        ex.execute { shut() }
+    }
+
+    private fun shut() {
+        val p = proc
+        proc = null
+        if (p != null) {
+            try {
+                p.outputStream.close()
+            } catch (e: Throwable) {
+            }
+            try {
+                p.destroy()
+            } catch (e: Throwable) {
             }
         }
     }
 
-    private fun openShell(): Process? {
+    private fun newProc(cmd: Array<String>): Process? {
         return try {
             val cls = Class.forName("rikka.shizuku.Shizuku")
             val m = cls.getDeclaredMethod("newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java)
             m.isAccessible = true
-            m.invoke(null, arrayOf("sh"), null, null) as Process
+            m.invoke(null, cmd, null, null) as Process
         } catch (e: Throwable) {
             null
         }
     }
 
-    private fun send(cmd: String) {
+    private fun openFast(): Process? {
+        val apk = Triggers.apk()
+        if (apk.isEmpty()) return null
+        val p = newProc(arrayOf("sh", "-c", "exec app_process -Djava.class.path=" + apk + " /system/bin com.example.gameturbo.InjectorKt")) ?: return null
+        val latch = CountDownLatch(1)
+        var ok = false
+        val watcher = Thread {
+            try {
+                val r = p.inputStream.bufferedReader()
+                ok = r.readLine() == "READY"
+                latch.countDown()
+                if (ok) {
+                    while (true) {
+                        val l = r.readLine() ?: break
+                        if (l == "ERR") {
+                            ex.execute {
+                                fast = false
+                                shut()
+                            }
+                            break
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+            }
+            latch.countDown()
+        }
+        watcher.isDaemon = true
+        watcher.start()
+        try {
+            latch.await(3, TimeUnit.SECONDS)
+        } catch (e: Throwable) {
+        }
+        if (!ok) {
+            try {
+                p.destroy()
+            } catch (e: Throwable) {
+            }
+            return null
+        }
+        return p
+    }
+
+    private fun ensure(): Boolean {
+        if (proc != null) return true
+        if (!triedFast || fast) {
+            triedFast = true
+            val p = openFast()
+            if (p != null) {
+                proc = p
+                fast = true
+                return true
+            }
+            fast = false
+        }
+        val q = newProc(arrayOf("sh"))
+        proc = q
+        return q != null
+    }
+
+    private fun run(x: Int, y: Int, hold: Int) {
         for (attempt in 0..1) {
             try {
-                var p = proc
-                if (p == null) {
-                    p = openShell()
-                    proc = p
+                if (!ensure()) return
+                val cmd = if (fast) {
+                    "T " + x + " " + y + " " + hold
+                } else {
+                    "input swipe " + x + " " + y + " " + x + " " + y + " " + hold + " >/dev/null 2>&1 &"
                 }
-                if (p == null) return
-                val o = p.outputStream
+                val o = proc!!.outputStream
                 o.write((cmd + "\n").toByteArray())
                 o.flush()
                 return
@@ -136,6 +205,11 @@ object Triggers {
     private var onDone: (() -> Unit)? = null
 
     fun size(): Int = list.size
+
+    fun apk(): String {
+        val a = app ?: return ""
+        return a.applicationInfo.sourceDir ?: ""
+    }
 
     fun restore(c: Context) {
         setup(c)
@@ -203,7 +277,7 @@ object Triggers {
     }
 
     private fun lp(w: Int, h: Int, x: Int, y: Int, touch: Boolean): LP {
-        var f = LP.FLAG_NOT_FOCUSABLE or LP.FLAG_LAYOUT_IN_SCREEN or LP.FLAG_LAYOUT_NO_LIMITS
+        var f = LP.FLAG_NOT_FOCUSABLE or LP.FLAG_LAYOUT_IN_SCREEN or LP.FLAG_LAYOUT_NO_LIMITS or LP.FLAG_SPLIT_TOUCH
         if (!touch) f = f or LP.FLAG_NOT_TOUCHABLE
         val p = LP(w, h, LP.TYPE_APPLICATION_OVERLAY, f, PixelFormat.TRANSLUCENT)
         p.gravity = Gravity.TOP or Gravity.START
@@ -759,6 +833,12 @@ object Triggers {
             card.orientation = LinearLayout.VERTICAL
             card.setPadding(dp(10), dp(8), dp(10), dp(8))
             card.background = rr(Mc.BTN, dp(14).toFloat(), 0x228B5CF6)
+            card.addView(edBtn("⚡ Preset Gloo Wall (tahan & cepat)", Mc.ACC, Mc.DARK) {
+                t.mode = 1
+                t.hold = 20
+                t.gap = 45
+                renderEditor()
+            }, lm(-1, -2, 0f))
             card.addView(c.tv("Mode tekan", 12f, Mc.DIM))
             val modes = LinearLayout(c)
             modes.orientation = LinearLayout.HORIZONTAL
@@ -771,7 +851,7 @@ object Triggers {
             }
             card.addView(modes)
             card.addView(valSlider("Durasi tekan", 20, 500, " ms", { t.hold }, { t.hold = it }, 10))
-            card.addView(valSlider("Jeda ulang", 30, 1000, " ms", { t.gap }, { t.gap = it }, 10))
+            card.addView(valSlider("Jeda ulang", 30, 1000, " ms", { t.gap }, { t.gap = it }, 5))
             card.addView(valSlider("Jumlah ketukan (mode Sekali)", 1, 20, "x", { t.count }, { t.count = it }, 1))
             card.addView(c.tv("Target: " + t.targets.size + "/3", 12f, Mc.DIM))
             card.addView(edBtn("Hapus target terakhir", Mc.BG, Mc.TXT) {
