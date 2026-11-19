@@ -1,6 +1,7 @@
 package com.example.gameturbo
 
 import android.os.IBinder
+import android.os.Looper
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.InputEvent
@@ -8,20 +9,57 @@ import android.view.MotionEvent
 import java.lang.reflect.Method
 import java.util.concurrent.LinkedBlockingQueue
 
-private var inputMgr: Any? = null
-private var injectMethod: Method? = null
+private var target: Any? = null
+private var method: Method? = null
+private var viaUid = false
 private var reported = false
+private var how = ""
+private var why = ""
 
-private fun setup(): Boolean {
+private fun prepareLooper() {
+    try {
+        Looper.prepare()
+        val f = Looper::class.java.getDeclaredField("sMainLooper")
+        f.isAccessible = true
+        f.set(null, Looper.myLooper())
+    } catch (e: Throwable) {
+    }
+}
+
+private fun tryManager(): Boolean {
+    return try {
+        val cls = Class.forName("android.hardware.input.InputManager")
+        val inst = cls.getDeclaredMethod("getInstance").invoke(null)
+        val m = cls.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
+        target = inst
+        method = m
+        how = "InputManager"
+        true
+    } catch (e: Throwable) {
+        why += "[InputManager: " + (e.cause ?: e) + "] "
+        false
+    }
+}
+
+private fun tryBinder(): Boolean {
     return try {
         val sm = Class.forName("android.os.ServiceManager")
         val binder = sm.getMethod("getService", String::class.java).invoke(null, "input") as IBinder
         val stub = Class.forName("android.hardware.input.IInputManager\$Stub")
-        val mgr = stub.getMethod("asInterface", IBinder::class.java).invoke(null, binder)
-        inputMgr = mgr
-        injectMethod = mgr!!.javaClass.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
+        val mgr = stub.getMethod("asInterface", IBinder::class.java).invoke(null, binder)!!
+        var m: Method? = null
+        try {
+            m = mgr.javaClass.getMethod("injectInputEvent", InputEvent::class.java, Int::class.javaPrimitiveType)
+        } catch (e: Throwable) {
+            m = mgr.javaClass.getMethod("injectInputEventToTarget", InputEvent::class.java, Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+            viaUid = true
+        }
+        target = mgr
+        method = m
+        how = if (viaUid) "IInputManager(target)" else "IInputManager"
         true
     } catch (e: Throwable) {
+        why += "[IInputManager: " + (e.cause ?: e) + "] "
         false
     }
 }
@@ -30,11 +68,16 @@ private fun inject(action: Int, x: Float, y: Float, down: Long) {
     val ev = MotionEvent.obtain(down, SystemClock.uptimeMillis(), action, x, y, 1.0f, 1.0f, 0, 1.0f, 1.0f, 0, 0)
     ev.source = InputDevice.SOURCE_TOUCHSCREEN
     try {
-        injectMethod!!.invoke(inputMgr, ev, 0)
+        if (viaUid) {
+            method!!.invoke(target, ev, 0, -1)
+        } else {
+            method!!.invoke(target, ev, 0)
+        }
     } catch (e: Throwable) {
         if (!reported) {
             reported = true
             println("ERR")
+            println("WHY " + (e.cause ?: e))
             System.out.flush()
         }
     }
@@ -61,12 +104,15 @@ private fun swipe(x1: Float, y1: Float, x2: Float, y2: Float, dur: Long) {
 }
 
 fun main(args: Array<String>) {
-    if (!setup()) {
+    prepareLooper()
+    if (!tryManager() && !tryBinder()) {
         println("FAIL")
+        println("WHY " + why)
         System.out.flush()
         return
     }
     println("READY")
+    println("INFO " + how)
     System.out.flush()
     val q = LinkedBlockingQueue<String>()
     val reader = Thread {
